@@ -203,7 +203,7 @@ with st.sidebar:
     # =========================
     # Day 9: Admin Controls (persisted)
     # =========================
-    st.subheader("Admin controls (Day 9)")
+    st.subheader("Answer settings")
 
     s: AdminSettings = st.session_state.admin_settings
 
@@ -271,10 +271,10 @@ with st.sidebar:
     # =========================
     # Guardrails controls (Day 6)
     # =========================
-    st.subheader("Guardrails (Day 6)")
+    st.subheader("Safety rules")
 
     idk_threshold = st.slider(
-        "IDK threshold (min top score to answer)",
+        "Minimum confidence to answer",
         min_value=0.0,
         max_value=1.0,
         value=IDK_SCORE_THRESHOLD_DEFAULT,
@@ -293,7 +293,7 @@ with st.sidebar:
         if md_count == 0 and txt_count == 0:
             st.error(f"No .md/.txt docs found in: {DOCS_DIR}")
         else:
-            st.success(f"Using docs folder: {DOCS_DIR}")
+            st.success("Docs loaded from: `data/raw/`")
             st.caption(f".md: {md_count} | .txt: {txt_count}")
 
     st.caption(f"LLM: {'ON' if use_llm else 'OFF'} | model: {model}")
@@ -305,7 +305,7 @@ with st.sidebar:
     # =========================
     # Day 10: Analytics toggle
     # =========================
-    show_analytics = st.toggle("📊 Show Analytics (Day 10)", value=False)
+    show_analytics = st.toggle("📊 Show Analytics", value=False)
 
 
 # =========================
