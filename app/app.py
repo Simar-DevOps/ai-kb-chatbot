@@ -11,18 +11,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 
 import streamlit as st
-import pandas as pd  # Day 10: analytics
+import pandas as pd  # analytics
 
 # Load environment variables from .env (local only; should be gitignored)
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     # If python-dotenv isn't installed, env vars can still come from the OS.
     pass
 
 OPENAI_API_KEY = (os.getenv("OPENAI_API_KEY") or "").strip()
-
 
 # =========================
 # Fix imports when app is inside /app
@@ -36,34 +36,26 @@ from src.answerer import answer_with_sources
 from src.guardrails import decide_if_can_answer, idk_response
 from src.feedback_store import append_feedback_csv, append_feedback_jsonl
 
-# Day 9: persisted admin settings
 from src.admin_settings import load_settings, save_settings, reset_settings, AdminSettings
-
 
 # =========================
 # Config knobs
 # =========================
 APP_TITLE = "Support KB Chatbot"
-
-# Day 10: bump version
 APP_VERSION = "week2-day10"
 
-# Day 8: feedback logging
 FEEDBACK_DIR = PROJECT_ROOT / "data" / "feedback"
 FEEDBACK_CSV_PATH = FEEDBACK_DIR / "feedback.csv"
 FEEDBACK_JSONL_PATH = FEEDBACK_DIR / "feedback.jsonl"
 
-# Day 10: questions logging (you already created /logs)
 LOGS_DIR = PROJECT_ROOT / "logs"
 QUESTIONS_CSV_PATH = LOGS_DIR / "questions.csv"
 
-# IMPORTANT: your docs live under data/raw (per your directory listing)
 DOCS_DIR = PROJECT_ROOT / "data" / "raw"
 
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
-# Day 6 guardrail defaults (you can tune later)
 IDK_SCORE_THRESHOLD_DEFAULT = 0.20  # if best chunk score < this => IDK
 
 EXAMPLE_QUESTIONS = [
@@ -73,7 +65,6 @@ EXAMPLE_QUESTIONS = [
     "How do I request a refund?",
     "Where can I find my invoices?",
 ]
-
 
 # =========================
 # Page setup
@@ -99,17 +90,15 @@ def get_retriever(data_dir: Path, chunk_size: int, overlap: int) -> BM25Retrieve
 
 
 # =========================
-# Day 10: Analytics helpers
+# Analytics helpers
 # =========================
 def ensure_dir(p: Path) -> None:
-    # Why: prevent "folder not found" crashes when writing logs
     p.mkdir(parents=True, exist_ok=True)
 
 
 def append_question_csv(path: Path, row: Dict[str, Any]) -> None:
     """
     Write one question row to logs/questions.csv (create file + header if missing).
-    Why (kid version): This is our "diary" of what users asked.
     """
     ensure_dir(path.parent)
 
@@ -141,13 +130,9 @@ def append_question_csv(path: Path, row: Dict[str, Any]) -> None:
 
 
 def normalize_query(text: str) -> str:
-    """
-    Make similar questions count as the same:
-    'Reset password?' and 'reset password' -> same bucket.
-    """
     t = (text or "").lower().strip()
     t = re.sub(r"\s+", " ", t)
-    t = re.sub(r"[^\w\s]", "", t)  # remove punctuation
+    t = re.sub(r"[^\w\s]", "", t)
     return t
 
 
@@ -157,7 +142,6 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
     try:
         return pd.read_csv(path)
     except Exception:
-        # If file is mid-write or weird encoding, don’t crash the app.
         return pd.DataFrame()
 
 
@@ -173,139 +157,124 @@ if "session_id" not in st.session_state:
 if "pending_user_message" not in st.session_state:
     st.session_state.pending_user_message = None
 
-# Day 9: persisted admin settings (disk -> session_state once)
 if "admin_settings" not in st.session_state:
     st.session_state.admin_settings = load_settings()
 
 
 # =========================
-# Sidebar UX
+# Sidebar (polished)
 # =========================
 with st.sidebar:
-    st.subheader("Quick actions")
+    st.markdown("### Control Center")
 
-    if st.button("🧹 Reset chat", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.pending_user_message = None
-        st.session_state.session_id = str(uuid.uuid4())  # new session for new chat
-        st.rerun()
+    # ---- STATUS ----
+    with st.expander("✅ Status", expanded=True):
+        docs_ok = DOCS_DIR.exists() and (
+            len(list(DOCS_DIR.glob("*.md"))) > 0 or len(list(DOCS_DIR.glob("*.txt"))) > 0
+        )
+        md_count = len(list(DOCS_DIR.glob("*.md"))) if DOCS_DIR.exists() else 0
+        txt_count = len(list(DOCS_DIR.glob("*.txt"))) if DOCS_DIR.exists() else 0
+
+        if docs_ok:
+            st.success("Docs loaded from: `data/raw/`")
+        else:
+            st.error("Docs missing. Add .md/.txt files to `data/raw/`.")
+        st.caption(f".md: {md_count} | .txt: {txt_count}")
 
     st.divider()
 
-    st.subheader("Example questions")
-    for q in EXAMPLE_QUESTIONS:
-        if st.button(q, use_container_width=True):
-            st.session_state.pending_user_message = q
+    # ---- QUICK ACTIONS ----
+    with st.expander("🧹 Quick actions", expanded=True):
+        if st.button("Reset chat", use_container_width=True):
+            st.session_state.messages = []
+            st.session_state.pending_user_message = None
+            st.session_state.session_id = str(uuid.uuid4())
             st.rerun()
 
-    st.divider()
+    # ---- EXAMPLES ----
+    with st.expander("💡 Example questions", expanded=False):
+        for q in EXAMPLE_QUESTIONS:
+            if st.button(q, use_container_width=True):
+                st.session_state.pending_user_message = q
+                st.rerun()
 
-    # =========================
-    # Day 9: Admin Controls (persisted)
-    # =========================
-    st.subheader("Answer settings")
+    # ---- SETTINGS ----
+    with st.expander("⚙️ Answer settings", expanded=True):
+        s: AdminSettings = st.session_state.admin_settings
 
-    s: AdminSettings = st.session_state.admin_settings
+        MODEL_OPTIONS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini"]
 
-    MODEL_OPTIONS = [
-        "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-4.1-mini",
-    ]
-
-    # Widgets default to saved values
-    new_model = st.selectbox(
-        "Model",
-        options=MODEL_OPTIONS,
-        index=MODEL_OPTIONS.index(s.model) if s.model in MODEL_OPTIONS else 0,
-    )
-    new_top_k = st.slider("Top-K chunks", min_value=1, max_value=10, value=int(s.top_k), step=1)
-    new_temperature = st.slider("Answer temperature", min_value=0.0, max_value=1.0, value=float(s.temperature), step=0.05)
-    new_max_tokens = st.slider("Max answer tokens", min_value=100, max_value=2000, value=int(s.max_tokens), step=50)
-    new_use_llm = st.toggle("LLM Answering (ON/OFF)", value=bool(s.use_llm))
-
-    c1, c2 = st.columns(2)
-    with c1:
-        save_now = st.button("💾 Save settings", use_container_width=True)
-    with c2:
-        do_reset = st.button("↩️ Reset settings", use_container_width=True)
-
-    if do_reset:
-        st.session_state.admin_settings = reset_settings()
-        st.toast("Admin settings reset to defaults", icon="✅")
-        st.rerun()
-
-    changed = (
-        new_model != s.model
-        or int(new_top_k) != int(s.top_k)
-        or float(new_temperature) != float(s.temperature)
-        or int(new_max_tokens) != int(s.max_tokens)
-        or bool(new_use_llm) != bool(s.use_llm)
-    )
-
-    if save_now or changed:
-        st.session_state.admin_settings = AdminSettings(
-            model=new_model,
-            top_k=int(new_top_k),
-            temperature=float(new_temperature),
-            max_tokens=int(new_max_tokens),
-            use_llm=bool(new_use_llm),
+        new_model = st.selectbox(
+            "Model",
+            options=MODEL_OPTIONS,
+            index=MODEL_OPTIONS.index(s.model) if s.model in MODEL_OPTIONS else 0,
         )
-        save_settings(st.session_state.admin_settings)
+        new_top_k = st.slider("Top-K chunks", 1, 10, int(s.top_k), 1)
+        new_temperature = st.slider("Answer temperature", 0.0, 1.0, float(s.temperature), 0.05)
+        new_max_tokens = st.slider("Max answer tokens", 100, 2000, int(s.max_tokens), 50)
+        requested_use_llm = st.toggle("LLM answering (ON/OFF)", value=bool(s.use_llm))
 
-    # Make these available to the rest of the app
-    s = st.session_state.admin_settings
-    top_k = int(s.top_k)
-    temperature = float(s.temperature)
-    max_tokens = int(s.max_tokens)
-    model = str(s.model)
+        c1, c2 = st.columns(2)
+        with c1:
+            save_now = st.button("Save", use_container_width=True)
+        with c2:
+            do_reset = st.button("Reset", use_container_width=True)
 
-    # IMPORTANT: If the OpenAI key isn't set, force retrieval-only mode safely.
-    requested_use_llm = bool(s.use_llm)
-    if requested_use_llm and not OPENAI_API_KEY:
-        st.warning("OPENAI_API_KEY not set. LLM mode is disabled. Add it to a local .env file.", icon="🔒")
-    use_llm = bool(requested_use_llm and OPENAI_API_KEY)
+        if do_reset:
+            st.session_state.admin_settings = reset_settings()
+            st.toast("Settings reset to defaults", icon="✅")
+            st.rerun()
 
-    st.divider()
+        changed = (
+            new_model != s.model
+            or int(new_top_k) != int(s.top_k)
+            or float(new_temperature) != float(s.temperature)
+            or int(new_max_tokens) != int(s.max_tokens)
+            or bool(requested_use_llm) != bool(s.use_llm)
+        )
 
-    # =========================
-    # Guardrails controls (Day 6)
-    # =========================
-    st.subheader("Safety rules")
+        if save_now or changed:
+            st.session_state.admin_settings = AdminSettings(
+                model=new_model,
+                top_k=int(new_top_k),
+                temperature=float(new_temperature),
+                max_tokens=int(new_max_tokens),
+                use_llm=bool(requested_use_llm),
+            )
+            save_settings(st.session_state.admin_settings)
 
-    idk_threshold = st.slider(
-        "Minimum confidence to answer",
-        min_value=0.0,
-        max_value=1.0,
-        value=IDK_SCORE_THRESHOLD_DEFAULT,
-        step=0.05,
-    )
-    show_guardrail_debug = st.checkbox("Show guardrail debug", value=False)
+        # Make available to the rest of the app
+        s = st.session_state.admin_settings
+        top_k = int(s.top_k)
+        temperature = float(s.temperature)
+        max_tokens = int(s.max_tokens)
+        model = str(s.model)
 
-    st.divider()
-    st.subheader("Docs status")
+        # If no key, force retrieval-only mode safely
+        if bool(s.use_llm) and not OPENAI_API_KEY:
+            st.warning("OPENAI_API_KEY not set. LLM mode is disabled. Add it to a local .env file.", icon="🔒")
 
-    if not DOCS_DIR.exists():
-        st.error(f"Docs folder not found: {DOCS_DIR}")
-    else:
-        md_count = len(list(DOCS_DIR.glob("*.md")))
-        txt_count = len(list(DOCS_DIR.glob("*.txt")))
-        if md_count == 0 and txt_count == 0:
-            st.error(f"No .md/.txt docs found in: {DOCS_DIR}")
-        else:
-            st.success("Docs loaded from: `data/raw/`")
-            st.caption(f".md: {md_count} | .txt: {txt_count}")
+        use_llm = bool(s.use_llm and OPENAI_API_KEY)
 
-    st.caption(f"LLM: {'ON' if use_llm else 'OFF'} | model: {model}")
-    if not OPENAI_API_KEY:
-        st.caption("To enable LLM: create a local .env with OPENAI_API_KEY=... (do not commit it).")
+        st.caption(f"LLM: {'ON' if use_llm else 'OFF'} | model: {model}")
+        if not OPENAI_API_KEY:
+            st.caption("To enable LLM: create a local `.env` with OPENAI_API_KEY=... (do not commit it).")
 
-    st.divider()
+    # ---- SAFETY ----
+    with st.expander("🛡️ Safety rules", expanded=False):
+        idk_threshold = st.slider(
+            "Minimum confidence to answer",
+            0.0,
+            1.0,
+            IDK_SCORE_THRESHOLD_DEFAULT,
+            0.05,
+        )
+        show_guardrail_debug = st.checkbox("Show safety debug", value=False)
 
-    # =========================
-    # Day 10: Analytics toggle
-    # =========================
-    show_analytics = st.toggle("📊 Show Analytics", value=False)
+    # ---- ANALYTICS ----
+    with st.expander("📊 Analytics", expanded=False):
+        show_analytics = st.toggle("Show analytics", value=False)
+        st.caption("Analytics are stored locally (not committed).")
 
 
 # =========================
@@ -345,12 +314,7 @@ def render_guardrail_debug(guardrail: Optional[Dict[str, Any]]) -> None:
             st.write(f"missing_terms: {guardrail.get('missing_terms')}")
 
 
-# ---- Day 8: feedback save + buttons ----
 def save_feedback(rating: str, msg: Dict[str, Any]) -> None:
-    """
-    rating: "up" or "down"
-    msg: assistant message dict from st.session_state.messages
-    """
     payload = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "session_id": st.session_state.session_id,
@@ -363,7 +327,6 @@ def save_feedback(rating: str, msg: Dict[str, Any]) -> None:
             for s in (msg.get("sources", []) or [])
         ],
         "guardrail": msg.get("guardrail", {}),
-        # Day 9: include admin settings for analytics later
         "admin": {
             "model": msg.get("model", ""),
             "use_llm": msg.get("use_llm", ""),
@@ -411,37 +374,31 @@ def render_feedback_buttons(msg: Dict[str, Any]) -> None:
 
 
 def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]], int]:
-    """
-    Returns:
-      answer_text
-      sources_to_show (what the UI will show)
-      guardrail info (for debug)
-      retrieved_chunks_count (for analytics even if we show no sources)
-    """
-    # Guard so the app doesn't crash if docs are missing
+    # Guard: don't crash if docs are missing
     if (not DOCS_DIR.exists()) or (
         len(list(DOCS_DIR.glob("*.md"))) == 0 and len(list(DOCS_DIR.glob("*.txt"))) == 0
     ):
         msg = (
             "I don’t know based on the documentation I have loaded.\n\n"
-            f"**Reason:** No .md/.txt files found in **{DOCS_DIR}**.\n\n"
+            "**Reason:** No .md/.txt files found in `data/raw/`.\n\n"
             "Put your support docs in `data/raw/` and try again."
         )
-        return msg, [], {
-            "can_answer": False,
-            "reason": "Docs folder missing or empty.",
-            "best_score": 0.0,
-            "threshold": float(idk_threshold),
-        }, 0
+        return (
+            msg,
+            [],
+            {
+                "can_answer": False,
+                "reason": "Docs folder missing or empty.",
+                "best_score": 0.0,
+                "threshold": float(idk_threshold),
+            },
+            0,
+        )
 
     retriever = get_retriever(DOCS_DIR, CHUNK_SIZE, CHUNK_OVERLAP)
     retrieved = retriever.search(question, k=top_k)
     retrieved_count = len(retrieved)
 
-    # =========================
-    # Day 6: HARD guardrail gate
-    # If docs don't support the question => do NOT call the LLM
-    # =========================
     decision = decide_if_can_answer(
         question=question,
         retrieved_chunks=retrieved,
@@ -460,13 +417,8 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
         guardrail_info["missing_terms"] = list(getattr(decision, "missing_terms"))
 
     if not decision.can_answer:
-        # Keep UI clean: show no sources for IDK
         return idk_response(question), [], guardrail_info, retrieved_count
 
-    # =========================
-    # Day 9: LLM Toggle
-    # If LLM is OFF => retrieval-only response (no generation)
-    # =========================
     if not use_llm:
         answer_lines = [
             "**LLM is OFF (retrieval-only mode).**",
@@ -482,24 +434,22 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
             answer_lines.append(f"{i}. **{src} — chunk {cid}**: {snippet}")
         return "\n".join(answer_lines), retrieved, guardrail_info, retrieved_count
 
-    # LLM answering (existing)
-    # NOTE: src.answerer should read OPENAI_API_KEY from environment.
+    # LLM answering
     answer_text, sources = answer_with_sources(
         question=question,
         sources=retrieved,
         temperature=temperature,
         max_tokens=max_tokens,
-        # model is persisted in settings for Day 9,
-        # but only pass it if your answerer supports it.
+        # model exists in settings, but pass only if your answerer supports it
     )
     return answer_text, sources, guardrail_info, retrieved_count
 
 
 # =========================
-# Day 10: Analytics UI (shows above chat)
+# Analytics UI (above chat)
 # =========================
 if show_analytics:
-    st.subheader("📊 Analytics v1 (Day 10)")
+    st.subheader("📊 Analytics")
 
     qdf = safe_read_csv(QUESTIONS_CSV_PATH)
     fdf = safe_read_csv(FEEDBACK_CSV_PATH)
@@ -507,12 +457,6 @@ if show_analytics:
     total_questions = int(len(qdf)) if not qdf.empty else 0
     unique_sessions = int(qdf["session_id"].nunique()) if (not qdf.empty and "session_id" in qdf.columns) else 0
 
-    # =========================
-    # Day 10 FIX:
-    # Only count feedback that matches question_ids in logs/questions.csv.
-    # Also compute "feedback rate" as: questions with feedback / total questions
-    # so it never goes above 100% from double-clicks.
-    # =========================
     fdf_matched = pd.DataFrame()
     unmatched_feedback = 0
 
@@ -525,7 +469,9 @@ if show_analytics:
         unmatched_feedback = int(len(fdf)) if not fdf.empty else 0
 
     matched_feedback_clicks = int(len(fdf_matched)) if not fdf_matched.empty else 0
-    feedback_questions = int(fdf_matched["message_id"].nunique()) if (not fdf_matched.empty and "message_id" in fdf_matched.columns) else 0
+    feedback_questions = (
+        int(fdf_matched["message_id"].nunique()) if (not fdf_matched.empty and "message_id" in fdf_matched.columns) else 0
+    )
     feedback_rate = (feedback_questions / total_questions) if total_questions else 0.0
 
     thumbs_up = int((fdf_matched["rating"] == "up").sum()) if (not fdf_matched.empty and "rating" in fdf_matched.columns) else 0
@@ -551,7 +497,7 @@ if show_analytics:
             .sort_values("count", ascending=False)
             .head(10)
         )
-        st.markdown("### Top Queries (Top 10)")
+        st.markdown("### Top Queries")
         st.dataframe(top, use_container_width=True, hide_index=True)
 
         st.markdown("### Most Recent Questions")
@@ -622,7 +568,6 @@ if user_input:
             "content": answer_text,
             "sources": sources,
             "guardrail": guardrail_info,
-            # Day 9: capture admin settings on each answer
             "top_k": int(top_k),
             "temperature": float(temperature),
             "max_tokens": int(max_tokens),
@@ -632,16 +577,12 @@ if user_input:
             "app_version": APP_VERSION,
         }
 
-        # =========================
-        # Day 10: Log the question (this is the key Day 10 feature)
-        # Why (kid version): every question goes into a diary file so we can count later.
-        # =========================
         append_question_csv(
             QUESTIONS_CSV_PATH,
             {
                 "ts_utc": timestamp_utc,
                 "session_id": st.session_state.session_id,
-                "question_id": message_id,  # 1 question -> 1 assistant message
+                "question_id": message_id,
                 "user_question": user_input,
                 "model": str(model),
                 "use_llm": str(bool(use_llm)),
@@ -660,3 +601,4 @@ if user_input:
         render_feedback_buttons(assistant_msg)
 
     st.session_state.messages.append(assistant_msg)
+
