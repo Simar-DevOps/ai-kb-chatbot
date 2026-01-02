@@ -11,6 +11,7 @@ A lightweight support knowledge-base chatbot that answers questions using **only
 - Guardrails: if docs don’t support the question → **no LLM call**
 - Feedback: 👍 / 👎 logged locally
 - Analytics: logs questions + shows top queries + feedback rate
+This repo ships with dummy docs only; local logs/feedback are ignored.
 
 ## Repo structure
 - `app/app.py` — Streamlit app UI + chat + analytics panel
@@ -25,3 +26,5 @@ python -m venv .venv
 # Windows PowerShell:
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+Tested on Python 3.14.2. If you run into install issues, try Python 3.12+.
