@@ -1,6 +1,7 @@
 # ===== Secrets (NEVER COMMIT) =====
 .env
 .env.*
+!.env.example
 .streamlit/secrets.toml
 app/.streamlit/secrets.toml
 
