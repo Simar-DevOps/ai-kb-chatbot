@@ -2,6 +2,16 @@
 
 A lightweight support knowledge-base chatbot that answers questions using **only** the provided documentation and shows **sources** for every answer. Includes **guardrails** (“I don’t know” when docs don’t support), **admin controls**, **feedback logging**, and **basic analytics**.
 
+## Screenshots
+![Chat UI](assets/ui-chat.png)
+![Sidebar controls](assets/ui-sidebar.png)
+
+## Demo flow (60–90 seconds)
+1. Ask: “How do I reset my password?” → answer + sources
+2. Ask an out-of-scope question → responds with “I don’t know”
+3. Toggle **LLM answering** OFF → retrieval-only excerpts
+4. Turn on **Analytics** → top queries + feedback rate
+
 ## What it does
 - Loads support docs from `data/raw/` (Markdown)
 - Retrieves the most relevant chunks (BM25)
