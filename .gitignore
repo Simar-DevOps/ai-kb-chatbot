@@ -1,0 +1,24 @@
+# ===== Secrets (NEVER COMMIT) =====
+.env
+.env.*
+.streamlit/secrets.toml
+app/.streamlit/secrets.toml
+
+# ===== Python =====
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ===== Local outputs (avoid pushing user data) =====
+logs/
+data/feedback/
+data/processed/
+data/admin_settings.json
+
+# ===== OS/editor =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
