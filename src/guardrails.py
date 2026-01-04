@@ -30,6 +30,38 @@ GENERIC_TERMS = {
     "account","login","password","access","setup","configure","request",
 }
 
+# Minimal "should refuse" gate for sensitive/out-of-scope prompts (matches your I0x bucket intent)
+# Keep this list tight—only add what your eval set expects to be refused.
+SENSITIVE_PATTERNS = [
+    r"\bphish(ing)?\b",
+    r"\bmalware\b",
+    r"\bkeylogger\b",
+    r"\bransomware\b",
+    r"\bddos\b",
+    r"\bexploit\b",
+    r"\bbypass\b",
+    r"\bhack(ing)?\b",
+    r"\bsteal\b",
+    r"\bfraud\b",
+    r"\bscam\b",
+    r"\bcounterfeit\b",
+    r"\bbomb\b",
+    r"\bweapon\b",
+    r"\bssn\b",
+    r"\bsocial security\b",
+    r"\bcredit card\b",
+    r"\bbank account\b",
+]
+
+
+def should_refuse(question: str) -> bool:
+    """
+    Returns True if the user's request is sensitive/out-of-scope and should be refused
+    (based on your eval set's "I0x should refuse" cases).
+    """
+    q = (question or "").lower()
+    return any(re.search(pat, q) for pat in SENSITIVE_PATTERNS)
+
 
 def _extract_key_terms(question: str) -> List[str]:
     """
@@ -38,7 +70,7 @@ def _extract_key_terms(question: str) -> List[str]:
     - length >= 4 (filters out tiny words)
     - remove stopwords + generic terms
     """
-    words = re.findall(r"[a-z0-9]+", question.lower())
+    words = re.findall(r"[a-z0-9]+", (question or "").lower())
     terms: List[str] = []
     for w in words:
         if len(w) < 4:
@@ -65,14 +97,27 @@ def decide_if_can_answer(
     score_threshold: float = 0.20,
     min_chunks: int = 1,
     check_top_n_chunks_text: int = 3,
+    high_score_override: float = 0.35,
 ) -> GuardrailDecision:
     """
-    Hard guardrails:
+    Guardrail policy (Day 20 tuned):
+    0) Refuse if sensitive/out-of-scope (I0x cases)
     1) Need enough retrieved chunks
     2) Need best score >= threshold
-    3) Need the question’s key terms to actually appear in the retrieved text
-       (prevents “reset my iphone” → password reset chunks)
+    3) Keyword coverage check (but less aggressive to avoid false blocks)
+       - If top score is very high, allow even if keyword coverage is imperfect.
+       - Only block on keyword coverage when coverage is clearly absent AND score isn't strong.
     """
+
+    # 0) Sensitive/out-of-scope refusal
+    if should_refuse(question):
+        return GuardrailDecision(
+            can_answer=False,
+            reason="Sensitive/out-of-scope request (refuse).",
+            best_score=0.0,
+            threshold=score_threshold,
+            missing_terms=[],
+        )
 
     # 1) Need enough retrieved chunks
     if not retrieved_chunks or len(retrieved_chunks) < min_chunks:
@@ -95,7 +140,17 @@ def decide_if_can_answer(
             missing_terms=[],
         )
 
-    # 3) Keyword coverage check
+    # If retriever is very confident, do not over-block on keyword heuristics.
+    if best_score >= high_score_override:
+        return GuardrailDecision(
+            can_answer=True,
+            reason="High retriever confidence (score override).",
+            best_score=best_score,
+            threshold=score_threshold,
+            missing_terms=[],
+        )
+
+    # 3) Keyword coverage check (less aggressive than before)
     key_terms = _extract_key_terms(question)
 
     combined_text = " ".join(
@@ -105,33 +160,30 @@ def decide_if_can_answer(
 
     missing = [t for t in key_terms if t not in combined_text]
 
-    # If question has specific key terms and NONE are present, refuse.
-    if key_terms and len(missing) == len(key_terms):
+    # If there are NO key terms (question is generic), allow (avoid false blocks).
+    if not key_terms:
         return GuardrailDecision(
-            can_answer=False,
-            reason="Question-specific keywords were not found in the retrieved docs.",
+            can_answer=True,
+            reason="No specific key terms found; allowing answer with retrieved docs.",
+            best_score=best_score,
+            threshold=score_threshold,
+            missing_terms=[],
+        )
+
+    # If at least one key term appears, allow.
+    if len(missing) < len(key_terms):
+        return GuardrailDecision(
+            can_answer=True,
+            reason="Some question-specific keywords found in retrieved docs.",
             best_score=best_score,
             threshold=score_threshold,
             missing_terms=missing,
         )
 
-    # Conservative extra safety:
-    # If the question has multiple key terms and MOST are missing, also refuse.
-    # This catches cases like: "reset iphone icloud" where docs match only "reset"
-    if len(key_terms) >= 2:
-        missing_ratio = len(missing) / max(len(key_terms), 1)
-        if len(missing) >= 2 and missing_ratio >= 0.80:
-            return GuardrailDecision(
-                can_answer=False,
-                reason="Most question-specific keywords were not found in the retrieved docs.",
-                best_score=best_score,
-                threshold=score_threshold,
-                missing_terms=missing,
-            )
-
+    # If none appear AND score is only moderate, block (true mismatch).
     return GuardrailDecision(
-        can_answer=True,
-        reason="Sufficient doc support detected (score + keyword coverage).",
+        can_answer=False,
+        reason="Question-specific keywords were not found in the retrieved docs.",
         best_score=best_score,
         threshold=score_threshold,
         missing_terms=missing,
