@@ -12,11 +12,22 @@ __pycache__/
 *.pyo
 *.pyd
 
+# ===== Streamlit cache/artifacts =====
+.streamlit/
+
 # ===== Local outputs (avoid pushing user data) =====
 logs/
 data/feedback/
 data/processed/
 data/admin_settings.json
+
+# ===== Evals (keep code + testset, ignore generated outputs) =====
+evals/results/
+evals/analysis/
+evals/**/results/
+evals/**/analysis/
+evals/**/*.csv
+evals/**/*.txt
 
 # ===== OS/editor =====
 .DS_Store
