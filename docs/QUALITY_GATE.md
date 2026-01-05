@@ -4,6 +4,7 @@
 - Day 18 Quick Checks: `evals/analysis/day18_quick_checks.txt`
 - Latest scored run: `evals/results/run_2026-01-04_200800_scored.csv`
 - Day 19 Failure Summary: `evals/analysis/day19_out_fixbucket/top_failures.md`
+- Evidence run: evals/results/run_2026-01-05_002114.csv + evals/results/run_  2026-01-05_002114_scored.csv
 
 ## Quality gate decision (PASS/FAIL)
 **Decision: FAIL**
