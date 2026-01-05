@@ -2,8 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import re
+
+
+# ✅ BM25 default threshold tuned to YOUR observed score range:
+# - Your "good" normal cases often have best_score around 1.1–2.5+
+# - Setting this too high (like 2.5) blocks legit normal questions.
+DEFAULT_BM25_THRESHOLD = 1.0
 
 
 @dataclass
@@ -15,30 +21,56 @@ class GuardrailDecision:
     missing_terms: List[str]
 
 
-# Keep this small + practical
 STOPWORDS = {
     "a","an","the","and","or","but","to","of","in","on","for","with","at","by","from",
     "is","are","was","were","be","been","being",
     "i","me","my","you","your","we","our","they","their",
     "how","what","why","when","where","can","could","should","would","do","does","did",
     "please","help",
+
+    # extra conversational filler (these were showing up as “missing_terms”)
+    "this","that","these","those","just","anything","everything","into","about",
+    "tell","give","exact","exactly","need","asap","month","right","left","side",
 }
 
-# These are “generic support words” that match lots of docs and cause false positives
+# Generic support words that match lots of docs and cause false positives
 GENERIC_TERMS = {
     "reset","issue","problem","error","fail","failed","fix","troubleshoot","troubleshooting",
-    "account","login","password","access","setup","configure","request",
+    "account","login","access","setup","configure","request",
 }
+
+_REFUSE_PATTERNS = [
+    r"\bbypass\b",
+    r"\bcircumvent\b",
+    r"\bdisable\b.*\bmfa\b",
+    r"\bturn\s*off\b.*\bmfa\b",
+    r"\bwithout verification\b",
+    r"\badmin password\b",
+    r"\bvpn server password\b",
+    r"\binternal vpn\b.*\b(ip|address)\b",
+    r"\bserver ip\b",
+    r"\bnetwork architecture\b",
+    r"\barchitecture\b.*\bdiagram\b",
+    r"\bcredentials?\b",
+    r"\bmaster password\b",
+    r"\bbackdoor\b",
+]
+
+
+def should_refuse(question: str) -> Tuple[bool, str]:
+    q = (question or "").lower().strip()
+    if not q:
+        return False, ""
+
+    for pat in _REFUSE_PATTERNS:
+        if re.search(pat, q):
+            return True, "Sensitive/out-of-scope request (security/credential/bypass)."
+
+    return False, ""
 
 
 def _extract_key_terms(question: str) -> List[str]:
-    """
-    Pull “meaningful” terms from the question:
-    - letters/numbers only
-    - length >= 4 (filters out tiny words)
-    - remove stopwords + generic terms
-    """
-    words = re.findall(r"[a-z0-9]+", question.lower())
+    words = re.findall(r"[a-z0-9]+", (question or "").lower())
     terms: List[str] = []
     for w in words:
         if len(w) < 4:
@@ -51,7 +83,7 @@ def _extract_key_terms(question: str) -> List[str]:
 
     # de-dupe while preserving order
     seen = set()
-    unique = []
+    unique: List[str] = []
     for t in terms:
         if t not in seen:
             unique.append(t)
@@ -59,39 +91,42 @@ def _extract_key_terms(question: str) -> List[str]:
     return unique
 
 
+def _term_variants(t: str) -> List[str]:
+    """
+    Small normalization to reduce false negatives:
+    - handle simple plural forms: sites -> site
+    """
+    variants = [t]
+    if t.endswith("s") and len(t) > 4:
+        variants.append(t[:-1])
+    return list(dict.fromkeys(variants))
+
+
 def decide_if_can_answer(
     question: str,
     retrieved_chunks: List[Dict[str, Any]],
-    score_threshold: float = 0.20,
+    score_threshold: float = DEFAULT_BM25_THRESHOLD,
     min_chunks: int = 1,
     check_top_n_chunks_text: int = 3,
 ) -> GuardrailDecision:
-    """
-    Hard guardrails:
-    1) Need enough retrieved chunks
-    2) Need best score >= threshold
-    3) Need the question’s key terms to actually appear in the retrieved text
-       (prevents “reset my iphone” → password reset chunks)
-    """
-
     # 1) Need enough retrieved chunks
     if not retrieved_chunks or len(retrieved_chunks) < min_chunks:
         return GuardrailDecision(
             can_answer=False,
             reason="No relevant documentation chunks were retrieved.",
             best_score=0.0,
-            threshold=score_threshold,
+            threshold=float(score_threshold),
             missing_terms=[],
         )
 
     # 2) Need best score >= threshold
     best_score = float(retrieved_chunks[0].get("score") or 0.0)
-    if best_score < score_threshold:
+    if best_score < float(score_threshold):
         return GuardrailDecision(
             can_answer=False,
             reason="Top retrieved chunk score is below threshold.",
             best_score=best_score,
-            threshold=score_threshold,
+            threshold=float(score_threshold),
             missing_terms=[],
         )
 
@@ -103,29 +138,35 @@ def decide_if_can_answer(
         for i in range(min(check_top_n_chunks_text, len(retrieved_chunks)))
     )
 
-    missing = [t for t in key_terms if t not in combined_text]
+    present: List[str] = []
+    missing: List[str] = []
 
-    # If question has specific key terms and NONE are present, refuse.
-    if key_terms and len(missing) == len(key_terms):
+    for t in key_terms:
+        variants = _term_variants(t)
+        if any(v in combined_text for v in variants):
+            present.append(t)
+        else:
+            missing.append(t)
+
+    # If question has specific key terms and NONE are present, block.
+    if key_terms and len(present) == 0:
         return GuardrailDecision(
             can_answer=False,
             reason="Question-specific keywords were not found in the retrieved docs.",
             best_score=best_score,
-            threshold=score_threshold,
+            threshold=float(score_threshold),
             missing_terms=missing,
         )
 
-    # Conservative extra safety:
-    # If the question has multiple key terms and MOST are missing, also refuse.
-    # This catches cases like: "reset iphone icloud" where docs match only "reset"
-    if len(key_terms) >= 2:
+    # If multiple key terms and most missing, block (conservative)
+    if len(key_terms) >= 3:
         missing_ratio = len(missing) / max(len(key_terms), 1)
         if len(missing) >= 2 and missing_ratio >= 0.80:
             return GuardrailDecision(
                 can_answer=False,
                 reason="Most question-specific keywords were not found in the retrieved docs.",
                 best_score=best_score,
-                threshold=score_threshold,
+                threshold=float(score_threshold),
                 missing_terms=missing,
             )
 
@@ -133,15 +174,14 @@ def decide_if_can_answer(
         can_answer=True,
         reason="Sufficient doc support detected (score + keyword coverage).",
         best_score=best_score,
-        threshold=score_threshold,
+        threshold=float(score_threshold),
         missing_terms=missing,
     )
 
 
 def idk_response(user_question: str) -> str:
-    # Streamlit Markdown renders bullet lists cleanly; keep it action-oriented.
     return (
-        "I don’t know based on the documentation I have loaded.\n\n"
+        "I don't know based on the documentation I have loaded.\n\n"
         "**Next steps (so we can resolve this):**\n"
         "- If this is a product question, tell me the product/feature name and the exact screen or error text.\n"
         "- Share: environment (prod/dev), what you expected, what happened, and any steps to reproduce.\n"

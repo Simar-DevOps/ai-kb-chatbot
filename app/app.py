@@ -33,9 +33,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.retriever import build_kb_from_data_dir, BM25Retriever
 from src.answerer import answer_with_sources
-from src.guardrails import decide_if_can_answer, idk_response
+from src.guardrails import decide_if_can_answer, idk_response, should_refuse
 from src.feedback_store import append_feedback_csv, append_feedback_jsonl
-
 from src.admin_settings import load_settings, save_settings, reset_settings, AdminSettings
 
 # =========================
@@ -56,7 +55,8 @@ DOCS_DIR = PROJECT_ROOT / "data" / "raw"
 CHUNK_SIZE = 800
 CHUNK_OVERLAP = 150
 
-IDK_SCORE_THRESHOLD_DEFAULT = 0.20  # if best chunk score < this => IDK
+# NOTE: using BM25 "score" (not cosine similarity); typical values are > 1.
+IDK_SCORE_THRESHOLD_DEFAULT = 0.2  # if best chunk score < this => IDK
 
 EXAMPLE_QUESTIONS = [
     "How do I reset my password?",
@@ -73,7 +73,6 @@ st.set_page_config(page_title=APP_TITLE, page_icon="💬", layout="wide")
 st.title(f"💬 {APP_TITLE}")
 st.caption("Ask questions about the support docs. Answers include sources (chunks).")
 
-
 # =========================
 # Build / cache retriever
 # =========================
@@ -88,13 +87,11 @@ def get_retriever(data_dir: Path, chunk_size: int, overlap: int) -> BM25Retrieve
         k_overlap=overlap,
     )
 
-
 # =========================
 # Analytics helpers
 # =========================
 def ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
-
 
 def append_question_csv(path: Path, row: Dict[str, Any]) -> None:
     """
@@ -128,13 +125,11 @@ def append_question_csv(path: Path, row: Dict[str, Any]) -> None:
         cleaned = {k: row.get(k, "") for k in fieldnames}
         w.writerow(cleaned)
 
-
 def normalize_query(text: str) -> str:
     t = (text or "").lower().strip()
     t = re.sub(r"\s+", " ", t)
     t = re.sub(r"[^\w\s]", "", t)
     return t
-
 
 def safe_read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
@@ -143,7 +138,6 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path)
     except Exception:
         return pd.DataFrame()
-
 
 # =========================
 # Session state
@@ -159,7 +153,6 @@ if "pending_user_message" not in st.session_state:
 
 if "admin_settings" not in st.session_state:
     st.session_state.admin_settings = load_settings()
-
 
 # =========================
 # Sidebar (polished)
@@ -265,8 +258,8 @@ with st.sidebar:
         idk_threshold = st.slider(
             "Minimum confidence to answer",
             0.0,
-            1.0,
-            IDK_SCORE_THRESHOLD_DEFAULT,
+            10.0,
+            float(IDK_SCORE_THRESHOLD_DEFAULT),
             0.05,
         )
         show_guardrail_debug = st.checkbox("Show safety debug", value=False)
@@ -275,7 +268,6 @@ with st.sidebar:
     with st.expander("📊 Analytics", expanded=False):
         show_analytics = st.toggle("Show analytics", value=False)
         st.caption("Analytics are stored locally (not committed).")
-
 
 # =========================
 # Helpers
@@ -301,7 +293,6 @@ def render_sources(sources: List[Dict[str, Any]]) -> None:
             if text:
                 st.code(text, language="markdown")
 
-
 def render_guardrail_debug(guardrail: Optional[Dict[str, Any]]) -> None:
     if not guardrail:
         return
@@ -312,7 +303,6 @@ def render_guardrail_debug(guardrail: Optional[Dict[str, Any]]) -> None:
         st.write(f"threshold: {guardrail.get('threshold')}")
         if "missing_terms" in guardrail:
             st.write(f"missing_terms: {guardrail.get('missing_terms')}")
-
 
 def save_feedback(rating: str, msg: Dict[str, Any]) -> None:
     payload = {
@@ -357,7 +347,6 @@ def save_feedback(rating: str, msg: Dict[str, Any]) -> None:
     append_feedback_csv(FEEDBACK_CSV_PATH, row)
     append_feedback_jsonl(FEEDBACK_JSONL_PATH, payload)
 
-
 def render_feedback_buttons(msg: Dict[str, Any]) -> None:
     mid = msg.get("message_id")
     if not mid:
@@ -371,7 +360,6 @@ def render_feedback_buttons(msg: Dict[str, Any]) -> None:
     if c2.button("👎 Not helpful", key=f"fb_down_{mid}"):
         save_feedback("down", msg)
         st.toast("Saved 👎 feedback", icon="📝")
-
 
 def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dict[str, Any]], int]:
     # Guard: don't crash if docs are missing
@@ -395,6 +383,23 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
             0,
         )
 
+    # Refusal gate (tuple return!)
+    refuse, refuse_reason = should_refuse(question)
+    if refuse:
+        refuse_msg = (
+            "I can’t help with that request.\n\n"
+            "If you’re trying to solve a legitimate support issue, describe the product/feature and the exact error text "
+            "and I can help using the documentation."
+        )
+        guardrail_info = {
+            "can_answer": False,
+            "reason": refuse_reason or "Sensitive/out-of-scope request (refuse).",
+            "best_score": 0.0,
+            "threshold": float(idk_threshold),
+            "missing_terms": [],
+        }
+        return refuse_msg, [], guardrail_info, 0
+
     retriever = get_retriever(DOCS_DIR, CHUNK_SIZE, CHUNK_OVERLAP)
     retrieved = retriever.search(question, k=top_k)
     retrieved_count = len(retrieved)
@@ -407,7 +412,7 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
         check_top_n_chunks_text=3,
     )
 
-    guardrail_info = {
+    guardrail_info: Dict[str, Any] = {
         "can_answer": bool(decision.can_answer),
         "reason": str(decision.reason),
         "best_score": float(decision.best_score),
@@ -416,8 +421,9 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
     if hasattr(decision, "missing_terms"):
         guardrail_info["missing_terms"] = list(getattr(decision, "missing_terms"))
 
+    # IMPORTANT: return retrieved sources even when IDK so eval/debug doesn't flag NO_SOURCES
     if not decision.can_answer:
-        return idk_response(question), [], guardrail_info, retrieved_count
+        return idk_response(question), retrieved[:3], guardrail_info, retrieved_count
 
     if not use_llm:
         answer_lines = [
@@ -432,18 +438,17 @@ def run_pipeline(question: str) -> Tuple[str, List[Dict[str, Any]], Optional[Dic
             if len(snippet) > 400:
                 snippet = snippet[:400] + "..."
             answer_lines.append(f"{i}. **{src} — chunk {cid}**: {snippet}")
-        return "\n".join(answer_lines), retrieved, guardrail_info, retrieved_count
+        return "\n".join(answer_lines), retrieved[:3], guardrail_info, retrieved_count
 
     # LLM answering
     answer_text, sources = answer_with_sources(
         question=question,
         sources=retrieved,
+        model=model,
         temperature=temperature,
         max_tokens=max_tokens,
-        # model exists in settings, but pass only if your answerer supports it
     )
     return answer_text, sources, guardrail_info, retrieved_count
-
 
 # =========================
 # Analytics UI (above chat)
@@ -470,12 +475,22 @@ if show_analytics:
 
     matched_feedback_clicks = int(len(fdf_matched)) if not fdf_matched.empty else 0
     feedback_questions = (
-        int(fdf_matched["message_id"].nunique()) if (not fdf_matched.empty and "message_id" in fdf_matched.columns) else 0
+        int(fdf_matched["message_id"].nunique())
+        if (not fdf_matched.empty and "message_id" in fdf_matched.columns)
+        else 0
     )
     feedback_rate = (feedback_questions / total_questions) if total_questions else 0.0
 
-    thumbs_up = int((fdf_matched["rating"] == "up").sum()) if (not fdf_matched.empty and "rating" in fdf_matched.columns) else 0
-    thumbs_down = int((fdf_matched["rating"] == "down").sum()) if (not fdf_matched.empty and "rating" in fdf_matched.columns) else 0
+    thumbs_up = (
+        int((fdf_matched["rating"] == "up").sum())
+        if (not fdf_matched.empty and "rating" in fdf_matched.columns)
+        else 0
+    )
+    thumbs_down = (
+        int((fdf_matched["rating"] == "down").sum())
+        if (not fdf_matched.empty and "rating" in fdf_matched.columns)
+        else 0
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Questions", total_questions)
@@ -501,7 +516,11 @@ if show_analytics:
         st.dataframe(top, use_container_width=True, hide_index=True)
 
         st.markdown("### Most Recent Questions")
-        cols = [c for c in ["ts_utc", "user_question", "can_answer", "best_score", "retrieved_chunks_count"] if c in qdf.columns]
+        cols = [
+            c
+            for c in ["ts_utc", "user_question", "can_answer", "best_score", "retrieved_chunks_count"]
+            if c in qdf.columns
+        ]
         st.dataframe(qdf[cols].tail(10), use_container_width=True, hide_index=True)
 
     st.markdown("### Feedback Breakdown")
@@ -515,7 +534,6 @@ if show_analytics:
 
     st.divider()
 
-
 # =========================
 # Render chat history
 # =========================
@@ -528,7 +546,6 @@ for msg in st.session_state.messages:
             if show_guardrail_debug:
                 render_guardrail_debug(msg.get("guardrail"))
 
-
 # =========================
 # Chat input
 # =========================
@@ -537,7 +554,6 @@ user_input = st.chat_input("Type your question...")
 if st.session_state.pending_user_message and not user_input:
     user_input = st.session_state.pending_user_message
     st.session_state.pending_user_message = None
-
 
 # =========================
 # Handle new message
