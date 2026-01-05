@@ -34,3 +34,9 @@ evals/**/*.txt
 Thumbs.db
 .vscode/
 .idea/
+
+# ===== Generated eval outputs (keep scripts, ignore generated runs) =====
+evals/results/
+evals/analysis/day19_out_fixbucket/
+
+
