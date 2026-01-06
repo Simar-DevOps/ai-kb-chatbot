@@ -1,4 +1,4 @@
-# Day 19 — Failure Analysis Summary
+# Failure Analysis Summary
 
 - Total rows analyzed: **30**
 - Pass rate (bucket or score>= 4.0): **3.3%**
