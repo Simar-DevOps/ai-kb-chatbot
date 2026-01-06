@@ -21,7 +21,7 @@ data/feedback/
 data/processed/
 data/admin_settings.json
 
-# ===== Evals (keep code + testset, ignore generated outputs) =====
+# ===== Evals (keep code + testset, ignore generated outputs/evidence) =====
 evals/results/
 evals/analysis/
 evals/**/results/
@@ -29,14 +29,16 @@ evals/**/analysis/
 evals/**/*.csv
 evals/**/*.txt
 
+# If you ever want to commit small, curated analysis markdown later,
+# remove this line. For now it prevents “metrics” markdown from GitHub.
+evals/**/*.md
+
+# ===== Internal docs / evidence (keep local) =====
+docs/_internal/
+
 # ===== OS/editor =====
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-# ===== Generated eval outputs (keep scripts, ignore generated runs) =====
-evals/results/
-evals/analysis/day19_out_fixbucket/
-
 
